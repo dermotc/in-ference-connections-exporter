@@ -96,10 +96,15 @@ Use `assets/icon-128.png` (already generated from logo.png).
 Paste this into the Chrome Web Store Developer Console privacy policy field:
 
 ```
-https://raw.githubusercontent.com/nanaoosaki/linkedin_connections/main/PRIVACY_POLICY.md
+https://raw.githubusercontent.com/dermotc/in-ference-connections-exporter/main/PRIVACY_POLICY.md
 ```
 
-> **Note:** This URL only works once the repo is public and the file is pushed to `main`. If you use GitHub Pages, use that URL instead (cleaner rendering). To enable GitHub Pages: repo Settings → Pages → Deploy from branch → `main` / `/ (root)`.
+> **Corrected 18 Aug 2026** — this previously pointed at the upstream author's own repo
+> (`nanaoosaki/linkedin_connections`), whose privacy policy is a different document from
+> this fork's own `PRIVACY_POLICY.md`. Now points at the fork's own file, live at
+> `github.com/dermotc/in-ference-connections-exporter` (pushed 18 Aug 2026). If you use
+> GitHub Pages, use that URL instead (cleaner rendering). To enable: repo Settings → Pages
+> → Deploy from branch → `main` / `/ (root)`.
 
 ---
 
