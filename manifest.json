@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "in-ference Connections Exporter",
+  "version": "1.0.0",
+  "description": "Export your LinkedIn connections to a CSV in one click — name, employer, title, profile URL, connected date — ready to import into in-ference. No manual copying.",
+  "permissions": ["activeTab", "scripting"],
+  "host_permissions": ["https://www.linkedin.com/*"],
+  "icons": {
+    "16":  "icon-16.png",
+    "48":  "icon-48.png",
+    "128": "icon-128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16":  "icon-16.png",
+      "48":  "icon-48.png",
+      "128": "icon-128.png"
+    }
+  },
+  "content_scripts": [{
+    "matches": [
+      "https://www.linkedin.com/mynetwork/invite-connect/connections/",
+      "https://www.linkedin.com/mynetwork/invite-connect/connections/*"
+    ],
+    "js": ["content.js"]
+  }]
+}

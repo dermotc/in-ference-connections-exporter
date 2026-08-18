@@ -1,0 +1,715 @@
+# AI Engineering Notes
+
+This file documents the first-pass build of the LinkedIn Connections Exporter extension using Claude Code. It records what the model got right, where it drifted or hallucinated, what fixture gaps caused problems, and what changes fixed behavior. Intended as a living reference for future iterations and for anyone evaluating AI-assisted extension development.
+
+---
+
+## Human–AI collaboration map
+
+This section tracks which parts of the project required human input, which were fully AI-generated, and how the boundary between them might evolve. The goal is to make the collaboration visible so it can be reasoned about and gradually improved.
+
+### What the human supplied
+
+**The HTML fixtures.**
+Both fixture files — `tests/fixtures/connection-card-basic.html` and `tests/fixtures/connections-list-basic.html` — were provided directly by the human. The human navigated to their own LinkedIn connections page, captured the live DOM output, sanitised it, and placed the files in the repository.
+
+This was the single most critical human contribution to the project. Without real fixture HTML, the AI had no ground truth for:
+- which DOM elements actually exist on the page
+- what the class names, attributes, and nesting structure look like
+- what field values are realistic (name, headline, date format)
+
+The AI could not have produced these fixtures itself. LinkedIn is a closed, login-gated platform. The AI has no browser, no LinkedIn account, and no way to observe the live DOM. It can reason about what LinkedIn's markup *might* look like based on training data, but that knowledge is stale and partial. The fixtures are the bridge between AI reasoning and live reality.
+
+**The live validation run.**
+The human also performed the only live test of the extension — loading it unpacked in Chrome, navigating to their real connections page, and clicking Export. This produced the first real signal: 10 connections downloaded correctly, and the "Receiving end does not exist" error was discovered and reported. The AI cannot perform browser-based testing and depends entirely on the human for this feedback loop.
+
+**Scope and constraints.**
+The CLAUDE.md and REVIEW.md files that defined the v1 scope, architecture constraints, and done criteria were human-authored. The AI built within those boundaries but did not set them.
+
+### What the AI supplied
+
+- All TypeScript source code (`src/`)
+- All test logic (`tests/`)
+- Build configuration, manifest, popup HTML
+- Selector strategy and parser design (informed by the human-provided fixtures)
+- Documentation: TESTING.md, STATUS.md, AI_ENGINEERING_NOTES.md, LINKEDIN_EXPORT_HOWTO.md
+- CI workflow, hook scripts
+- Identification of the double-registration problem and the idempotency fix
+
+### Where the boundary is fragile today
+
+| Dependency | Why it requires the human today | Risk if not maintained |
+|-----------|--------------------------------|----------------------|
+| Fixtures | LinkedIn DOM is login-gated and changes without notice | Selectors break silently; tests stay green against stale HTML |
+| Live validation | No automated browser test against real LinkedIn | Regressions only discovered by manual use |
+| Fixture updates | When LinkedIn ships a new frontend, someone must re-capture the DOM | AI cannot self-update fixtures; tests diverge from reality |
+
+### How this boundary could evolve
+
+**Near term — human-assisted fixture refresh.**
+When LinkedIn updates its DOM and exports break, the workflow is: human captures a new page snippet → saves to `tests/fixtures/` → AI updates selectors and tests. This is already the intended maintenance path; it just needs to be practiced.
+
+**Medium term — semi-automated fixture capture.**
+A browser automation script (Playwright, Puppeteer) run by a logged-in human could capture a fresh fixture on demand and write it to `tests/fixtures/connections-list-basic.html`. The human still needs to trigger it and be logged in, but the DOM capture and file write are automated. The AI could author this script.
+
+**Longer term — snapshot-diff alerting.**
+A scheduled run of the capture script could diff the new fixture against the committed one and open a GitHub issue if the structure has changed. The human is notified rather than having to discover it through a broken export. The AI could author both the script and the issue template.
+
+**What cannot be automated away.**
+LinkedIn authentication will always require a human. Any fixture-capture pipeline depends on a logged-in session. This is a hard dependency that cannot be engineered around without storing credentials — which is outside the v1 scope and a deliberate security boundary.
+
+---
+
+## What Claude got right immediately
+
+**Selector isolation.**
+The very first design placed all LinkedIn-specific DOM selectors in a single file (`src/content/selectors.ts`). No class strings leaked into the parser or any other module. This is the highest-fragility part of the codebase, and isolating it requires deliberate architectural intent — the model did it without prompting.
+
+**CSV formula-injection safety.**
+The `escapeCell` function in `src/export/csv.ts` correctly identifies the five dangerous prefix characters (`=`, `+`, `-`, `@`, tab/CR) and prepends a tab to neutralize them before quoting. This is a non-obvious requirement that many implementations miss. It was included in the first draft.
+
+**RFC 4180 quoting.**
+CRLF line endings, double-quote escaping (`""` inside quoted fields), and conditional quoting (only when needed) were all correct on the first attempt. The test suite confirmed this.
+
+**MV3 manifest structure.**
+`manifest_version: 3`, `service_worker`-free background (no background script at all for v1), minimal permissions (`activeTab`, `scripting`), and tightly scoped `host_permissions` were all correct without iteration.
+
+**Graceful degradation.**
+The parser returns an empty string (not `null` or `undefined`) for every missing field, and skips cards where the name cannot be found. No `null` literals appear in CSV output.
+
+---
+
+## Where Claude hallucinated or overfit
+
+**The single-card fixture test was vacuous.**
+The test for `connection-card-basic.html` asserted `connections.length >= 0` — always true. The reason: the single-card fixture has no `[data-testid="lazy-column"]` wrapper, so the card selector matches nothing, and the test passes vacuously. Claude wrote a comment acknowledging this but still accepted the tautological assertion. This is a test that gives false confidence.
+
+*Fix needed:* The single-card fixture test should either (a) wrap the fixture HTML in the expected list structure before parsing, or (b) use a separate `parseCard` export that accepts a single card element directly.
+
+**`tsconfig.json` `types` array was incomplete.**
+The initial `tsconfig.json` only listed `"chrome"` in the `types` field. This caused jest globals (`test`, `expect`, `describe`) to be invisible to `tsc`. The model required one correction cycle to add `"jest"` and `"node"`. This is a recurring pattern: Chrome extension TypeScript configs and Jest TypeScript configs have conflicting type requirements that are easy to misconfigure.
+
+**`TextEncoder` polyfill was not anticipated.**
+jest-jsdom does not expose `TextEncoder`/`TextDecoder` from Node's `util` by default. The model had to add a `tests/setup.ts` polyfill after the first test run failed. This is a known jest-jsdom friction point but was not pre-empted.
+
+**No `npm run check` script in first draft.**
+The REVIEW.md instructions said "run lint, typecheck, test, and build" but the first `package.json` had no combined `check` script. The model wrote them as four separate scripts. A composite `check` script was only added when the user explicitly asked for enforced gates.
+
+---
+
+## Fixture gaps that caused failures
+
+**The connections-list-basic.html file was at the project root, not in `tests/fixtures/`.**
+The fixture was delivered at `D:/AI/linkedin_connections/connections-list-basic.html` but the parser test expected it at `tests/fixtures/connections-list-basic.html`. A `cp` command was required. The model handled this correctly once the discrepancy was noticed, but it could have been caught earlier by checking the fixture directory before writing tests.
+
+**The single-card fixture lacks the list wrapper.**
+`tests/fixtures/connection-card-basic.html` is a bare card element — no `<section>`, no `[data-testid="lazy-column"]`, no `[data-display-contents]` wrapper. The CARD selector requires all three ancestors. As a result, `parseConnections` returns 0 results on the single-card fixture, making the existing test nearly useless for catching regressions in single-card parsing.
+
+*What a better fixture would look like:*
+```html
+<section>
+  <div data-testid="lazy-column">
+    <div data-display-contents="true">
+      <!-- card HTML here -->
+    </div>
+  </div>
+</section>
+```
+
+---
+
+## Prompt and file-rule changes that improved behavior
+
+**Providing the full selector ancestry in the prompt.**
+The initial prompt described the card selector as `div[componentkey]`. After the agent read the actual fixture, it inferred the full three-level path `[data-testid="lazy-column"] [data-display-contents="true"] > [componentkey]`. Explicitly stating the full selector ancestry in the task prompt would have saved one inference cycle.
+
+**Specifying "empty string, not null" for missing fields.**
+This was stated explicitly in the task description: "Handle missing fields gracefully (return empty string, not null/undefined)". Without this constraint, the model would likely have returned `null` from the parser and written `"null"` into CSV cells.
+
+**Telling the model to use `data-testid` and `componentkey` over class names where available.**
+The model weighted `data-testid` as "more stable than obfuscated classes" when this was explicitly called out. Without the guidance, it might have relied entirely on class selectors.
+
+---
+
+## What required human intervention
+
+1. **Requesting the reviewer subagent file.** The REVIEW.md instructed Claude to "review your own changes using the extension-reviewer subagent," but no subagent definition file existed. The model completed the build but did not self-review because there was nothing to invoke. The reviewer agent was only created when the user explicitly asked for it.
+
+2. **Requesting enforced CI gates.** The model wrote `npm run lint`, `npm run typecheck`, etc., but did not create a CI workflow, pre-commit hook, or combined `check` script until asked. These are mechanical enforcement mechanisms, not code correctness issues — the model treated them as optional scaffolding.
+
+3. **Requesting this engineering log.** The model produced working code, passing tests, and TESTING.md, but did not record its own decision trail. A request to document "what Claude got right, where it hallucinated, what fixtures caused failures" was needed to produce this file.
+
+---
+
+## Risks and ongoing concerns
+
+| Concern | Severity | Owner |
+|---------|----------|-------|
+| Obfuscated class selectors will break on LinkedIn deploy | High | Update `selectors.ts` after each breakage |
+| Single-card fixture test is vacuous | Medium | Refactor to wrap card in list structure |
+| No selector change detection (no automated alert when selectors stop working) | Medium | Consider a canary test that runs against a locally saved full page snapshot |
+| Virtual list — large connection lists require manual scrolling | Low (by design) | Document in TESTING.md, consider future scroll helper |
+| `downloadCsv` uses `document.createElement` — untestable without a real DOM | Low | Unit test `buildCsv` only; manual test `downloadCsv` |
+
+---
+
+## Session metadata
+
+- Date: 2026-03-19
+- Model: Claude Sonnet 4.6 (claude-sonnet-4-6)
+- Tools used: Write, Edit, Read, Bash, Glob, Grep, Agent (general-purpose subagent for full build)
+- Automated check results at handoff: lint ✓, typecheck ✓, test ✓ (10/10), build ✓
+- Human interventions: 3 (reviewer agent file, CI enforcement, this log)
+
+---
+
+## Update — 2026-03-21: Fixture hardening, selector strategy, parser refactor
+
+### Fixture improvements
+
+The single-card fixture (`tests/fixtures/connection-card-basic.html`) was delivered as a bare `<div componentkey="...">` element at the document root. The card selector requires three ancestor levels — `[data-testid="lazy-column"]`, `[data-display-contents="true"]`, and then the card itself as a direct child. Without the wrapper, `querySelectorAll(SELECTORS.CARD)` returned nothing on the single-card fixture, and the existing test passed only because it asserted `length >= 0`.
+
+Fix: the fixture was wrapped in the correct ancestry:
+```html
+<section>
+  <div data-testid="lazy-column">
+    <div data-display-contents="true">
+      <div componentkey="auto-component-..."> ... </div>
+    </div>
+  </div>
+</section>
+```
+
+The rule going forward: every fixture must match the structural contract the selectors expect, not just contain the raw card HTML. `connections-list-basic.html` is the source of truth for the list structure; `connection-card-basic.html` must mirror that ancestry to be useful.
+
+### Selector strategy: obfuscated class names removed
+
+The first-pass `selectors.ts` contained three selectors that depended on LinkedIn's obfuscated build-time class names:
+- `p[class*="b21f8722"]` for name
+- `p[class*="b3be7b7c"]` for headline
+- `p[class*="_7dc1e841"]` for connected date
+
+These are high-fragility: LinkedIn can rotate them with any frontend deploy. All three were deleted.
+
+Replaced with:
+
+**`PROFILE_TEXT_LINK`**: `a[href*="linkedin.com/in/"]:not([style])`
+The card contains two profile links with identical `href` values — one wraps the photo thumbnail (and carries `style="height:7.2rem;width:7.2rem"`), the other wraps the name and headline text (no inline style). The `:not([style])` distinction is semi-stable: it depends on LinkedIn continuing to apply the inline dimension style only to the photo link. This is structural, not class-based, and tied to how the thumbnail is sized rather than to an obfuscated identifier.
+
+**Connected date by text prefix**
+CSS has no `:contains` selector. Rather than fall back to a class name, the parser now walks all `<p>` elements in the card and finds the one whose trimmed text content starts with `"Connected on"`. LinkedIn's user-facing label text is far more stable than a build-time class name — changing it would be a UX-visible regression on their side.
+
+No obfuscated class names remain anywhere in `src/`.
+
+### Parser strategy changes
+
+`parseCard` was simplified to three extraction patterns:
+
+1. **Name + headline** — `querySelectorAll('p')` on the text profile link. The first `<p>` is always the name; the second is always the headline. This relies on document order within the anchor element, which is a layout guarantee rather than a class-based one.
+
+2. **Profile URL** — `card.querySelector(SELECTORS.PROFILE_LINK).href`. Both profile links share the same href; the first match is correct.
+
+3. **Connected date** — text-prefix search over all `<p>` elements in the card. Returns empty string if not found.
+
+The parser now has zero references to class names. Selector changes are confined entirely to `selectors.ts`.
+
+### Removal of vacuous tests
+
+The original single-card test suite contained one test:
+```typescript
+expect(connections.length).toBeGreaterThanOrEqual(0);
+```
+This is always true regardless of parser behaviour and provides no regression protection. It was replaced with six tests that assert exact known values from the fixture:
+- `connections.length === 1`
+- `name === 'Siba Prasad'`
+- `profileUrl` matches `/linkedin\.com\/in\/sibaps\//`
+- `headline` matches `/Talent Acquisition Lead/`
+- `connectedOn === 'Connected on March 19, 2026'`
+- `messageUrl` matches `/\/messaging\/compose\//`
+
+The list fixture tests were also strengthened from `toBeTruthy()` / `toMatch` on the first card only to invariant assertions across every parsed card (no null fields anywhere, all `connectedOn` values start with `"Connected on"`, all profile URLs contain `linkedin.com/in/`).
+
+### Test count: 10 → 17
+
+| Suite | Before | After |
+|-------|--------|-------|
+| `csv.test.ts` | 5 | 5 (unchanged) |
+| `parser.test.ts` | 5 | 12 |
+| **Total** | **10** | **17** |
+
+All 17 pass. `npm run check` (lint + typecheck + test + build) is green.
+
+### Remaining risks before live LinkedIn validation
+
+| Risk | Notes |
+|------|-------|
+| `:not([style])` selector | If LinkedIn ever adds a style attribute to the text profile link (e.g. for layout reasons), name and headline extraction silently returns empty strings. The card would be dropped (`name` is the null-guard). Mitigation: monitor for 0-result exports after LinkedIn deploys. |
+| Positional `p` extraction | Name is `ps[0]`, headline is `ps[1]`. If LinkedIn inserts an additional `<p>` before the name inside the text link (e.g. a badge or notification), the extraction would shift. Mitigation: the exact-value test on the single-card fixture would catch this on the next fixture update. |
+| `data-display-contents` wrapper | The card selector requires `[data-display-contents="true"]` as an intermediate ancestor. This attribute is used by LinkedIn for CSS `display: contents` layout. It is structural/functional rather than a class name, making it more stable, but it is not a public contract. |
+| No live DOM validation yet | All passing tests are against saved fixtures. The selectors have not been confirmed to work against the current production LinkedIn DOM. **Live validation is the next required step.** |
+
+---
+
+## Update — 2026-03-22: Robust injection, live validation result, design retrospective
+
+### What happened in live testing
+
+The extension was loaded unpacked and tested against a real LinkedIn connections page. First attempt produced the error:
+
+```
+Error: Could not establish connection. Receiving end does not exist.
+```
+
+Refreshing the connections page and clicking Export again produced a successful download of 10 connections. The extension was functionally correct — the problem was purely an injection timing issue, not a logic or selector defect.
+
+### Why the original declarative-only design failed in practice
+
+The original design registered the content script exclusively through the `content_scripts` entry in `manifest.json`. This is the "declarative" injection model: Chrome reads the manifest at extension load time and injects the script automatically into any matching tab that **navigates** after that point.
+
+The failure mode: if the user has the connections page open in a tab before they load (or reload) the extension, Chrome never injects the content script into that tab. The tab was already past the navigation event. When the popup fires `chrome.tabs.sendMessage`, there is no listener on the other end — hence "Receiving end does not exist."
+
+A second, related failure mode: the original manifest pattern was `connections/*`, which requires a trailing slash followed by any path. The URL `https://…/connections` (no trailing slash) does not match. LinkedIn sometimes serves the page at the slash-less URL.
+
+Both failures are **silent** — the extension loads without error, the popup opens, and the failure only appears when the user clicks Export.
+
+### Why we designed it the declarative way first
+
+Declarative injection (`content_scripts` in the manifest) is the canonical, textbook approach for Chrome extensions. It is how every tutorial and the official Chrome documentation introduces content scripts. It is also conceptually clean: the manifest declares intent, Chrome handles execution. There is no code in the popup that needs to know anything about injection.
+
+The problem is that the textbook approach implicitly assumes a clean workflow: install extension → navigate to page → use it. It does not account for the more realistic workflow of a developer or power user who already has the target page open, or who reloads the extension mid-session. The declarative model is correct in theory but brittle in any workflow where the extension lifecycle and the page lifecycle are not perfectly sequenced.
+
+### Why the programmatic approach is more robust
+
+The updated design adds a single `chrome.scripting.executeScript` call in the popup handler, immediately before sending the message:
+
+```typescript
+await chrome.scripting.executeScript({
+  target: { tabId: tab.id },
+  files: ['content.js'],
+});
+const response = await chrome.tabs.sendMessage(tab.id, { type: 'EXPORT' });
+```
+
+This has three properties the declarative-only design lacks:
+
+**1. Self-healing injection.** If the content script was never injected (page was open before extension loaded), the popup injects it on demand. If it was already injected, the `window.__liExporterLoaded` guard prevents a second listener from being registered. Either way the message send that follows is guaranteed to find a listener.
+
+**2. URL-pattern independence.** Programmatic injection uses the `activeTab` permission, not a URL pattern match. It works on any tab the user is actively on, including URL variants LinkedIn might use.
+
+**3. Explicit sequencing.** `executeScript` is `async`/`await` — the popup awaits injection completion before sending the message. The ordering constraint (script must be running before message arrives) is encoded in the code, not in a verbal instruction to the user.
+
+The tradeoff is a small amount of coupling: the popup now knows it is responsible for injection, rather than delegating that entirely to the manifest. This is acceptable because the popup is the only entry point for the user action anyway.
+
+### The double-registration problem and its solution
+
+Naively calling `executeScript` on a tab that already has the content script running would call `chrome.runtime.onMessage.addListener` a second time. Both listeners would receive the next message and both would call `sendResponse` — the second call throws "The message channel closed before a response was received."
+
+The fix is a module-level flag on the page's `window` object:
+
+```typescript
+if (!window.__liExporterLoaded) {
+  window.__liExporterLoaded = true;
+  chrome.runtime.onMessage.addListener(...);
+}
+```
+
+This is idempotent: however many times the script is injected, the listener is registered exactly once. The flag persists for the lifetime of the page, not the lifetime of the script execution.
+
+---
+
+## Abstracted engineering design principles
+
+These are patterns that emerged from building this small extension and are broadly applicable.
+
+### 1. Design for realistic workflows, not ideal ones
+
+The declarative injection model works in the idealized sequence: fresh browser, load extension, navigate, use. Real users don't follow idealized sequences. They have six tabs open, reload the extension mid-session, and navigate back to pages they left open.
+
+Before finalising any design that depends on sequencing between two independent lifecycles (here: extension load vs. page navigation), ask: what happens if the user is already on this page? What happens if they reload the extension? If the answer is "it silently breaks," the design is fragile.
+
+### 2. Silent failures are worse than loud ones
+
+Both failure modes here (wrong URL pattern, page pre-dated extension) produced a confusing error message rather than no feedback at all — which is good. But neither failure was catchable from the extension code itself before the user clicked Export. A more defensive design would check at popup-open time whether the content script is reachable (e.g., send a lightweight ping message) and show a warning before the user even clicks the button.
+
+### 3. Coupling can reduce fragility
+
+A common instinct in software design is to decouple components — and the declarative model maximises decoupling between the popup and the injection mechanism. But decoupling has a cost: when something goes wrong at the boundary, neither component knows or can recover. The programmatic injection approach introduces deliberate coupling (popup is responsible for injection), which allows the popup to ensure preconditions are met before proceeding. Sometimes explicit ownership of a dependency is more reliable than delegating it to an implicit mechanism.
+
+### 4. Idempotency as a design constraint
+
+Any operation that might be called multiple times — injection, registration, initialisation — should be designed to be idempotent from the start. The `window.__liExporterLoaded` guard is the simplest possible idempotency mechanism. The cost of adding it is two lines; the cost of not having it is a subtle, hard-to-diagnose double-listener bug. Default to idempotent operations wherever an action might be repeated.
+
+### 5. The gap between "it works on my machine in the right order" and "it works reliably"
+
+This extension worked correctly when the user followed the exact steps in the manual: build → load → navigate → export. The failure only appeared when the page was already open — a one-step deviation from the documented workflow. This gap between "works in documented order" and "works reliably in realistic use" is a common source of production bugs. Any time a design requires the user to follow a specific sequence of steps to avoid an error, treat that as a code smell and consider whether the sequence can be enforced in code instead.
+
+---
+
+## Update — 2026-03-22: Full-list export — design decision record
+
+### The problem
+
+The v1 extension only exports connections that are currently rendered in the DOM. LinkedIn renders its connections list as a virtual/lazy column — cards are injected as the user scrolls. A user with 500 connections would need to scroll ~25 times before clicking Export. A user with 2000 connections would need to scroll ~100 times. This is not a viable workflow.
+
+### Options considered
+
+**Option 1 — Auto-scroll loop in the content script.**
+The content script scrolls the page programmatically in a loop, waits for LinkedIn to render each new batch, checks whether the card count has grown, and repeats until the count stabilises. Then it parses and exports everything. A progress indicator in the popup shows the user how many connections have been loaded so far.
+
+**Option 2 — LinkedIn's internal Voyager API.**
+LinkedIn's page fetches connections from an internal undocumented REST/GraphQL endpoint (`/voyager/api/relationships/dash/connections`). The content script could replicate these paginated requests directly, parsing JSON rather than DOM. Auth cookies and CSRF tokens are already present in the browser session so no additional login is required.
+
+**Option 3 — Manual scroll with live card count.**
+Keep the manual scroll requirement but show the current DOM card count in the popup before export, so the user knows exactly how many connections they are about to export. Zero code complexity, no reliability risk, but still requires manual scrolling.
+
+### Why Option 2 was ruled out
+
+Option 2 is fast and technically achievable. It was rejected for the following reasons:
+
+**Terms of Service.** LinkedIn's User Agreement explicitly prohibits automated data collection and scraping. Reading the visible DOM of a page the user is actively viewing occupies a legal and ethical grey area that most browser extensions operate in. Making direct API calls in a loop is unambiguously automated extraction, regardless of whether the user is logged in.
+
+**Account risk.** LinkedIn actively rate-limits and flags automated API traffic. The risk for occasional personal use is low, but it is non-zero. A personal-use tool should not put the user's professional LinkedIn account at risk.
+
+**Silent failure mode.** DOM-based extraction fails visibly — 0 results, wrong names, broken CSV. API-based extraction fails silently — a changed response schema produces malformed output with no obvious signal to the user. Silent failures are worse than loud ones.
+
+**Maintenance burden.** The Voyager API is undocumented, unversioned, and changes without notice. Required request headers rotate. Pagination semantics shift. Every change requires reverse-engineering. The DOM also changes, but selector updates are localised and well-understood. API reverse-engineering is open-ended.
+
+### Why Option 1 was chosen
+
+Auto-scroll mirrors exactly what a human user does when they want to see all their connections. It is slow — roughly 30–60 seconds for 1000 connections depending on LinkedIn's render latency per batch — but it is unattended. The user clicks once and the extension does the scrolling. The progress indicator makes the wait tolerable by showing forward movement.
+
+It requires no new permissions beyond what v1 already uses. It introduces no API fragility. It carries no ToS or account risk beyond what already exists for the v1 DOM reading.
+
+The one genuine risk is that LinkedIn could detect the scroll pattern as non-human and throttle it. The mitigation is to scroll at a human-plausible pace (one scroll per ~800–1000ms) rather than as fast as possible.
+
+### Chosen design: auto-scroll with progress indicator
+
+**Scroll strategy:**
+- Scroll to the bottom of the page in increments
+- After each scroll, wait ~800ms for LinkedIn to render the next batch
+- Compare card count before and after the wait
+- If count grew: scroll again
+- If count did not grow after 2 consecutive checks: assume end of list reached
+- Then parse all cards and export
+
+**Stop condition:**
+Two consecutive scrolls with no new cards is the primary stop signal. LinkedIn also renders a visual end-of-list indicator ("You've reached the end of your connections") — querying for this element can serve as a secondary confirmation.
+
+**Progress indicator:**
+The popup UI needs to move beyond a simple button + status line. During a scroll run it should show:
+- A progress message: `Loading connections... 120 found`
+- The Export button should be disabled while scrolling is in progress
+- On completion: `Exported 487 connection(s).`
+- On error: a clear message with a suggestion
+
+**Async message flow:**
+The current popup sends one message and awaits one response. The scroll loop changes this: the content script needs to run for potentially 30–60 seconds, during which the popup should reflect live progress. Options:
+1. Single message, long-running response — simplest, but the popup shows no progress until the entire scroll completes
+2. Repeated polling messages from popup to content script — popup asks "how many so far?" on an interval
+3. Content script sends progress updates back to popup — requires the popup to stay open and listen, which it does as long as it's in focus
+
+Option 2 (polling) is the most straightforward to implement without restructuring the message architecture. The popup sends `{ type: 'EXPORT' }`, the content script starts scrolling, and the popup polls `{ type: 'PROGRESS' }` every second until it receives the final count.
+
+### What needs to change in v2
+
+| Component | Change |
+|-----------|--------|
+| `src/content/index.ts` | Add scroll loop logic; handle `PROGRESS` message type |
+| `src/popup/index.ts` | Add polling loop; update UI during scroll |
+| `popup.html` | Add progress display element; disable button during export |
+| `tests/` | Scroll logic is hard to unit-test against fixtures; integration test notes needed |
+| `TESTING.md` | Add manual test steps for one-click full export |
+| `STATUS.md` | Update after implementation |
+
+### What does not change
+
+The parser, selectors, CSV exporter, and domain model are unchanged. The scroll loop is purely an orchestration concern layered on top of the existing extraction logic. This is a validation that the v1 architecture separated concerns correctly.
+
+---
+
+## Update — 2026-03-22: Auto-scroll implementation (v2)
+
+### What was built
+
+**`src/content/scroll.ts`** — a new module containing `scrollUntilStable`, the entire scroll loop as a pure orchestration function. All side-effectful operations are injected as dependencies (`getCardCount`, `scrollToBottom`, `wait`, `isEndOfList`, `onProgress`). This makes the loop fully unit-testable without a browser.
+
+**`src/content/index.ts`** — updated to call `scrollUntilStable` before parsing. The `PROGRESS` message type was added so the popup can poll for a live count while the loop runs. A `window.__liExporterProgress` value is updated on each cycle and read by the PROGRESS handler.
+
+**`src/popup/index.ts`** — updated to poll for progress every 800ms using `setInterval`, display the running count, disable the Export button during the run, and show an indeterminate `<progress>` bar. The poll timer is cleared when the EXPORT response arrives.
+
+**`popup.html`** — added a `<progress>` element and a `button:disabled` style.
+
+**`src/content/selectors.ts`** — added `END_OF_LIST` selector as a secondary stop signal. Marked LOW/UNKNOWN stability since the exact selector requires live validation.
+
+**`tests/scroll.test.ts`** — 8 new unit tests covering: 2-stable-check stop, stable-counter reset on growth, immediate stop on end-of-list, `onProgress` call count, `wait` call count and argument, return value, zero-card graceful handling, and multi-growth plateau detection.
+
+Test count: **17 → 25** (all pass).
+
+### Testing design decision: why dependency injection
+
+The scroll loop is fundamentally about time and DOM mutation — it waits for LinkedIn to render cards after each scroll. Neither of these can be meaningfully exercised in JSDOM:
+- JSDOM has no scroll behaviour
+- JSDOM does not simulate LinkedIn's lazy renderer
+- Real timers would make tests 30–60 seconds long
+
+The solution is to extract all side effects behind an interface (`ScrollDeps`) and inject them. Tests pass mock implementations: `wait` resolves immediately, `getCardCount` returns values from a pre-defined sequence, `scrollToBottom` is a no-op spy. The test runs in milliseconds and exercises every code path.
+
+The real implementations are two-liners wired in `index.ts`:
+```typescript
+scrollToBottom: () => { const el = document.scrollingElement ?? document.documentElement; el.scrollTop = el.scrollHeight; },
+wait: (ms) => new Promise((r) => setTimeout(r, ms)),
+```
+
+This is the **dependency injection for testability** pattern. It costs one extra function signature but enables complete unit test coverage of logic that would otherwise be untestable without a browser.
+
+### A subtle bug discovered during testing
+
+The first draft of the scroll test contained this reasoning:
+```
+// Scroll 1: before=10 after=10 → stableChecks=1
+// Scroll 2: before=10 after=20 → growth, stableChecks=0  ← WRONG
+```
+
+The error: `before` at the start of each iteration is a fresh call to `getCardCount()`. By the time iteration 2 runs, the mock has already advanced past the "10" values. So `before` in iteration 2 reads the new grown count (20), and `after` also reads 20 — no growth visible, stable check increments immediately.
+
+**What this reveals:** `before` and `after` in the same iteration are the only two points where growth is observable. If the count grows *between* iterations (i.e., between the `after` of one iteration and the `before` of the next), the loop does not detect it. For the real LinkedIn page this is not a problem — LinkedIn's renderer adds cards after a scroll event, not spontaneously between polls. But it means the mock must simulate growth *within* a single before/after pair to test the reset behaviour.
+
+This was a test design bug, not a code bug. The loop implementation was correct. The fix was to revise the mock sequences so growth is visible within an iteration.
+
+### What requires live validation
+
+- Whether `document.scrollingElement.scrollTop = scrollHeight` triggers LinkedIn's lazy renderer in practice
+- The actual scroll wait time needed (900ms is a conservative estimate; may need tuning)
+- What LinkedIn's end-of-list DOM looks like (the `END_OF_LIST` selector is a placeholder)
+- Whether the PROGRESS polling interacts correctly with the EXPORT channel in a real Chrome tab
+
+### Remaining known limitation
+
+The `END_OF_LIST` selector in `selectors.ts` is a best-guess placeholder. If LinkedIn renders an end-of-list indicator but under a different selector, the loop will rely solely on the stable-count stop condition (2 consecutive no-growth cycles), which is still correct — it is just slightly slower to stop than if it detected the sentinel directly.
+
+---
+
+## Update — 2026-03-22: Virtual list discovery and collect-while-scroll fix
+
+### What the live test revealed
+
+First live test of the auto-scroll feature showed: progress bar reported "20 found", but the downloaded CSV contained only 10 connections. The user observed "only 2 loops of 10 connections."
+
+**Root cause: LinkedIn uses a true virtual list.**
+
+The connections list is not a simple ever-growing DOM. It is a virtualised renderer: as cards scroll out of the viewport, they are *removed* from the DOM to free memory. New cards at the bottom are added, but old cards at the top are deleted. The DOM at any moment contains only a window of currently visible cards — roughly 10–20 at a time.
+
+The first implementation scrolled to the bottom and then called `parseConnections(document)` once at the end. By that point, the top 10 connections had been recycled out of the DOM. Only the bottom 10 were still present — hence 10 in the CSV despite 20 being seen during scrolling.
+
+The "20 found" progress count was accurate at the moment it was read during the scroll loop. But the DOM had changed by the time parsing ran.
+
+### The fix: collect while scrolling
+
+`scrollUntilStable` (scroll first, parse once at the end) was replaced with `scrollAndCollect` (parse on every cycle, accumulate into a deduplicated Map).
+
+On every cycle:
+1. Parse whatever cards are currently in the DOM
+2. Add any not-yet-seen connections to a `Map<string, Connection>` keyed by `profileUrl`
+3. Scroll
+4. Repeat
+
+The stop condition is now based on **new unique connections per cycle**, not raw DOM card count. If a cycle produces 0 new unique connections, `stableChecks` increments. Two consecutive cycles with nothing new → stop.
+
+This naturally handles virtual list recycling: we capture each card while it is in the DOM window, before LinkedIn removes it.
+
+### What this means for the test suite
+
+The `ScrollDeps` interface changed: `getCardCount: () => number` was replaced with `getCards: () => Connection[]`. The stop signal is now "no new unique profileUrls" rather than "card count did not grow."
+
+A new test — `simulates virtual list` — directly models the recycling behaviour: each round returns a different DOM window of 10 cards with overlap. The test asserts that all 20 unique connections are collected despite the DOM never holding more than 10 at once.
+
+Test count: 25 → 26.
+
+### Second test bug caught
+
+The "stops immediately when isEndOfList" test initially asserted `scrollToBottom` called 1 time. The code checks `isEndOfList()` *before* `scrollToBottom()` — so when the sentinel is already present, `scrollToBottom` is called 0 times. The test expectation was wrong; the code was correct. Fixed by updating the assertion and adding a comment explaining the loop order.
+
+This is the same pattern as the previous test bug: the loop structure requires careful tracing to write correct count assertions. Inline comments explaining the cycle-by-cycle trace are now the standard for this test file.
+
+---
+
+## Update — 2026-03-22: Load More button discovery — the scroll assumption was wrong
+
+### What the live test revealed
+
+After the virtual list fix (collect-while-scroll), the progress counter and CSV were consistent — but the count never climbed past the initially rendered batch. Programmatic scrolling was having no effect on card loading whatsoever.
+
+**Diagnosis process:**
+
+1. Found the real scroll container using a DevTools query for all scrollable elements — only one result: `<main id="workspace">`. This was not `document.scrollingElement`.
+2. Tested `document.getElementById('workspace').scrollTop = scrollHeight` in the console — the page visually jumped to the bottom (returned 3288) but **no new cards loaded**.
+3. The user reported: *"there's this Load more button — will actually trigger new connections to be added."*
+
+**Root cause: the fundamental loading mechanism was wrong.**
+
+LinkedIn's connections page does not use infinite scroll. It uses an explicit **"Load more" button**. No amount of programmatic scrolling — regardless of which element is targeted — will ever load new cards. The button must be clicked.
+
+This was an assumption failure. The initial design assumed infinite scroll because that is the dominant pattern for social media feeds. It was never verified against the actual page behavior before building the scroll loop.
+
+### What the button looks like
+
+The Load More button (`<button>`) has:
+- No `data-testid`
+- No `id`
+- No `aria-label`
+- Only obfuscated class names (change on every LinkedIn deploy)
+- Visible text content: `"Load more"` (stable)
+
+The only reliable selector is text content — the same pattern already used to detect `"Connected on"` dates. This is now a documented selector strategy: when no structural attribute exists, text content is the fallback, and the text string lives in `selectors.ts` as `LOAD_MORE_BUTTON_TEXT`.
+
+### The redesign
+
+`scrollToBottom` and `isEndOfList` deps were removed. Replaced with a single `triggerNextLoad(): boolean`:
+- Finds the button by text content
+- Clicks it
+- Returns `true` if found and clicked, `false` if button is absent
+
+Button absence is the natural end-of-list signal — LinkedIn removes the button when all connections are loaded. No separate sentinel selector needed.
+
+Wait time increased from 900ms to 1200ms: a button click triggers a network fetch + re-render, which is slower than a scroll event triggering a local virtual list update.
+
+### Live result
+
+535 connections exported in one click. Progress count climbed in batches of ~10. CSV contained all connections with correct fields. ✓
+
+### What this reveals about the design process
+
+**Verify the loading mechanism before building the loader.**
+
+The scroll loop was built and tested against mocks before anyone confirmed whether LinkedIn used scroll or a button to load more content. The mock tests passed perfectly. The implementation was correct for the wrong mechanism.
+
+The correct order: open DevTools → manually trigger "load more" → observe what happens in the DOM and Network tabs → THEN design the loader. One minute of DevTools observation would have revealed the button before a single line of scroll code was written.
+
+This is a specific instance of the broader principle: **fixtures and mocks validate logic, not assumptions**. The scroll loop logic was correct. The assumption that scroll was the right trigger was wrong. Tests cannot catch wrong assumptions about external systems — only human observation of the live system can.
+
+### Abstracted principle
+
+**When integrating with an external system you do not control, observe first — build second.**
+
+For any feature that depends on how an external page behaves (loading mechanism, scroll container, authentication flow), the first step is always manual observation in the real environment. Write down what you see. Then design the code to match what actually happens, not what you assume happens based on common patterns elsewhere.
+
+Common patterns (infinite scroll, document-level scrolling, data-testid attributes) are useful priors but not guarantees. LinkedIn in particular has non-standard implementations of several standard UX patterns.
+
+---
+
+## Forward planning — 2026-03-22: Next iterations (not yet built)
+
+### Iteration 3: Speed optimisation — faster Load More without bot detection
+
+**The problem:** 535 connections at 1200ms per batch of ~10 takes roughly 60–90 seconds. The 1200ms wait is conservative — it was chosen to give LinkedIn's render pipeline enough time after a button click. Some of that wait is probably unnecessary.
+
+**What can be optimised:**
+- **Adaptive wait instead of fixed 1200ms.** Rather than waiting a fixed duration, poll the DOM every 100–200ms and proceed as soon as new cards appear. If cards appear in 400ms, don't wait the remaining 800ms. Cap at 2000ms as a safety timeout. This alone could cut total time by 30–50%.
+- **Collect during wait.** Currently we click, wait the full duration, then collect. We could start collecting as soon as the first new cards appear mid-wait, then click again immediately.
+- **Batch size awareness.** LinkedIn loads ~10 cards per click today. If that changes, the loop automatically adapts (Map deduplication handles any batch size).
+
+**Bot detection risk:**
+- Fixed timing is actually more bot-like than variable timing — real humans don't click at perfectly regular intervals
+- Adaptive wait with natural jitter (±100–200ms randomness) is both faster AND less detectable
+- Clicking the visible button (as opposed to XHR calls) is the most human-like action possible — low risk
+- Recommended approach: adaptive wait with jitter, not raw speed maximisation
+
+**What changes:** `scroll.ts` wait strategy — `scrollAndCollect` wait dep gets a smarter implementation in `index.ts`. The interface stays injectable and testable.
+
+---
+
+### Iteration 4: External database export — scope and risk assessment
+
+**The idea:** after collecting connections, push them to an external database (Airtable, Notion, Google Sheets, Supabase, etc.) rather than just downloading a CSV.
+
+**Why this is probably the right next question, not the right next build:**
+
+The CSV download is already usable. Anyone can import it into any database or CRM in two minutes. Building a direct integration means:
+- Choosing a specific database (which one? user's choice will vary)
+- Handling OAuth or API key configuration in the extension
+- Storing credentials somewhere (localStorage? chrome.storage?) — security surface
+- Managing API rate limits, schema mismatches, network failures
+- Maintaining the integration as both LinkedIn's DOM and the target API change
+
+**When it makes sense to build:**
+- You have a specific target database in mind and use it regularly
+- You are importing connections frequently enough that manual CSV import is genuinely painful
+- You are comfortable storing an API key in the extension
+
+**When it is overengineering:**
+- One-time or occasional export
+- The target database changes
+- Multiple users with different databases
+
+**Recommended path:** keep CSV as the primary output. Add a clearly-scoped v3 only if the specific database target is known and the import friction is measured as a real pain point.
+
+**If built, the right architecture:**
+- New `src/export/` module per integration (e.g. `src/export/sheets.ts`)
+- API key entered in the popup options page, stored in `chrome.storage.sync` (encrypted at rest by Chrome)
+- Export CSV first (as fallback), then attempt API push — never make the API the only output path
+- Each integration is optional and independently togglable
+
+---
+
+### Iteration 5: Chrome Web Store publication
+
+**What is required:**
+
+| Requirement | Current state | Gap |
+|-------------|--------------|-----|
+| MV3 manifest | ✓ done | — |
+| Privacy policy | ✗ not written | Required for extensions that access user data |
+| Store listing copy | ✗ not written | Name, description, screenshots, category |
+| Extension icons | ✗ not present | 16×16, 48×48, 128×128 PNG required |
+| Permissions justification | Partial | `activeTab` and `scripting` must be justified in the listing |
+| Review by Google | ✗ not submitted | Takes 1–3 business days |
+| Developer account | Unknown | $5 one-time fee if not already registered |
+
+**Permissions sensitivity:**
+`activeTab` and `scripting` are considered sensitive permissions. Google will ask for a written justification. The justification is straightforward: the extension reads the DOM of the active tab (LinkedIn connections page) only when the user explicitly clicks Export, and injects a content script only into that tab. No data leaves the user's machine except as a CSV file they control.
+
+**Recommended pre-publication steps:**
+1. Add 16×16, 48×48, 128×128 icons (`assets/` folder, referenced in `manifest.json`)
+2. Write a `PRIVACY_POLICY.md` — key points: no data collected, no network requests, CSV stays local, no analytics
+3. Draft store listing description
+4. Take screenshots of the popup and a sample CSV
+5. Run the Chrome extension linter: `npm install -g crx` or use the Web Store pre-review tool
+6. Submit for review
+
+**Risk:** Google may reject on first submission if the permissions justification is not detailed enough. This is common and fixable — rejection comes with specific feedback.
+
+**Scope note:** publication does not change any code. It is purely a packaging and submission task. The extension as built is already MV3-compliant and uses minimal permissions.
+
+---
+
+## Iteration 3 update — 2026-03-22
+
+### Iteration 3: Adaptive wait + time estimation in progress bar
+
+**Motivation.** The v2.2 implementation used a fixed 1200ms wait after each "Load more" click. This was arbitrary — a round number large enough to usually work, but wasteful when cards render faster. For 535 connections (~50+ click cycles), the extra wait time accumulates significantly. The human asked for a progress bar with a time-remaining estimate, which required both a more precise timing model and surfacing the total connection count.
+
+**Design decisions.**
+
+*Adaptive wait:* Replace the fixed wait with a polling loop that samples `getRenderedCardCount()` every 150ms and breaks as soon as the DOM count changes. A 2000ms ceiling prevents hanging indefinitely if the page is slow or the click has no effect. Random jitter (100–300ms) is added after the polling loop to avoid a mechanically regular click pattern. This is not strictly necessary for correctness, but it is good practice for browser automation against a real service.
+
+*Time estimation:* Rate-based projection — `rate = found / elapsedMs` (connections per ms) — extrapolated forward when the total connection count is known. The total is read from a `CONNECTIONS_TOTAL` selector (best-guess: `[data-testid="connections-count"]` or `.mn-connections__header h1`). If the selector finds nothing, the bar stays indeterminate and no ETA is shown. This graceful null path means the feature degrades cleanly if LinkedIn changes the total-count element's markup.
+
+*Determinate vs indeterminate bar:* When total is known, `progressEl.max = total` and `progressEl.value = found` make the bar fill proportionally (`X / total` text). When unknown, the `value` attribute is removed and the bar animates with the browser's default indeterminate style.
+
+**`ProgressInfo` interface.** `onProgress` previously received a bare number (connection count). It now receives `{ found, total, elapsedMs, remainingMs }`. This gives the popup everything it needs for both text status and ETA, and keeps the scroll module testable in isolation — the popup is fully decoupled from the timing logic.
+
+**`ScrollConfig` for testability.** Hardcoded timing constants (150ms poll interval, 2000ms max wait, jitter range) are now injectable via `ScrollConfig`. Tests use `FAST` config (`pollIntervalMs: 1, maxWaitMs: 1, jitterBaseMs: 0, jitterRangeMs: 1`) to eliminate real delays. The adaptive inner loop is also short-circuited in tests by a `makeDomCounter()` mock that alternates its return value — the loop sees `rawBefore !== current` on the first poll and breaks immediately. This avoids any real delay without mocking `setTimeout` or using fake timers.
+
+**What the AI got right first time:**
+- The elapsed-counter pattern (`waited += POLL_INTERVAL_MS`) for the inner loop, rather than `Date.now()` checks — the former works without real time passing, making tests trivially fast.
+- The graceful null fallback for `CONNECTIONS_TOTAL` (returns indeterminate rather than throwing).
+- The `makeDomCounter` alternating mock pattern.
+
+**What required care:**
+- The `CONNECTIONS_TOTAL` selector is still a best-guess — not live-validated. It is the only piece of the system that has not been confirmed against the real LinkedIn page. The graceful null fallback means this is low-risk at runtime, but a future live validation pass should confirm or update the selector.
+- Test assertions on `onProgress` calls had to be written carefully because `elapsedMs` is wall-clock-dependent and not deterministic in tests. `toMatchObject` (partial match) was used instead of deep equality to avoid brittle assertions.
+
+**Test changes.** `tests/scroll.test.ts` was fully rewritten: 10 tests → 11 tests, new `makeDeps` includes `getRenderedCardCount` and `getTotalCount`, `onProgress` assertions check `ProgressInfo` fields rather than raw numbers, all tests pass the `FAST` config. Total test count: 27 → 28.
+
+**Human input in this iteration:** Direction and requirements came entirely from the human ("add time estimation to the progress bar"). Code and architecture were AI-generated. No new fixtures were needed — the adaptive wait and ProgressInfo logic are fully exercisable with the existing mock infrastructure.
+
