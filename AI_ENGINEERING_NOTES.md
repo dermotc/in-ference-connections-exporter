@@ -713,3 +713,90 @@ The CSV download is already usable. Anyone can import it into any database or CR
 
 **Human input in this iteration:** Direction and requirements came entirely from the human ("add time estimation to the progress bar"). Code and architecture were AI-generated. No new fixtures were needed — the adaptive wait and ProgressInfo logic are fully exercisable with the existing mock infrastructure.
 
+---
+
+## Update — 2026-08-18: the Load More button is gone — LinkedIn switched to trusted-scroll-only loading
+
+### What happened
+
+The founder loaded the extension against their real account (29,793 connections) and got 19. Not
+a truncated batch, not a mid-run failure — 19 is almost exactly what renders in one initial
+viewport before any "load more" cycle runs at all, which was the first clue.
+
+**The human reported the actual page state directly** ("there is no 'Load more' button, its an
+endless scroll") rather than the AI guessing from a stack trace — the single most useful piece of
+information in this whole session, since it immediately reframed the problem from "which selector
+broke" to "the interaction model changed."
+
+### Investigation (AI, using a real logged-in session via a Chrome-attached tool)
+
+Unlike every previous drift fix in this log, the AI did not need the human to manually capture
+DOM/fixtures this time — a browser-automation tool with access to the founder's own logged-in
+Chrome session made it possible to inspect and test against the live page directly. Confirmed,
+in order:
+
+1. `[data-testid="lazy-column"]` and the `CARD` selector both still match — not a selector-drift
+   bug in the usual sense.
+2. `document.querySelectorAll('button')` filtered for load/more/show text: **zero matches.** The
+   button is genuinely gone, not renamed.
+3. The scrollable container is `<main>` (`overflow-y: auto`, `scrollHeight > clientHeight`).
+   `main.scrollTop = main.scrollHeight` moved the value correctly but triggered **no** new content
+   after 1.8s.
+4. Incremental `main.scrollBy(0, 500)` in a loop, waiting between steps — still nothing.
+5. A synthetic `WheelEvent` dispatch (`bubbles: true, cancelable: true, composed: true`) plus
+   `scrollBy` together — still nothing.
+6. A **real** scroll — the same automation tool's mouse-wheel action, which produces genuinely
+   trusted browser input, not page-context JS — reliably loaded dozens more cards every time,
+   confirmed repeatedly.
+
+Conclusion: LinkedIn's loader is gated on trusted input specifically, most likely an `isTrusted`
+check or equivalent on the scroll/wheel handler. This is a browser platform security boundary —
+no JS run inside a content script (this extension's entire execution model) can produce a trusted
+event. It was not attempted, but was considered and rejected: reverse-engineering LinkedIn's
+internal pagination API (found live at
+`flagship-web/rsc-action/actions/pagination?sduiid=...`) and calling it directly would work
+technically, but (a) breaks this extension's "zero network requests" privacy design outright, and
+(b) inspecting the live request to build it safely was itself blocked by the automation tool's own
+credential-exposure guard — a real, working safety boundary that made clear how much of a
+trust-model change that path would actually be, beyond what it first looked like.
+
+### Decision
+
+The founder chose the option that keeps the extension's design honest rather than the one that
+recovers full automation: **assisted scroll.** The user scrolls for real; the extension passively
+watches and collects. This is a smaller technical lift than it sounds, because the collection and
+dedup logic (`Map` keyed by `profileUrl`, virtual-list-safe) barely changes — only the thing
+*driving* collection changes, from an active click-and-wait loop to a passive DOM observer.
+
+### What changed
+
+- `scroll.ts`: `scrollAndCollect` (drove clicking + polling + a stop condition) replaced by
+  `startPassiveCollector` (ingests whatever's visible immediately, then re-ingests on every
+  DOM-change notification via an injected `onDomChange` — production wires this to a
+  `MutationObserver`, tests wire it to a manually-triggerable stub). No more click-triggering,
+  no more adaptive-wait polling loop, no more stop condition — there is no "done" any more, only
+  "however far you've scrolled so far."
+- `ProgressInfo` drops `remainingMs` — an ETA implied a known pace toward a known end, which no
+  longer describes anything real when the user controls timing entirely.
+- `content/index.ts`: collection now starts the instant the script loads (not on an EXPORT
+  message), continuing in the background independent of whether the popup is open. `EXPORT`
+  becomes a synchronous "package up whatever's collected" call — no more `await`ing a scroll loop.
+- Popup: progress bar removed (there is no known end to show a bar filling toward). Replaced with
+  a live "(X of Y)" count next to the Export button, refreshed on an 800ms poll while the popup is
+  open, plus instructional copy telling the user to scroll first.
+- `tests/scroll.test.ts` fully rewritten against the new API: 12 tests → 8, using a `trigger()`
+  stub for `onDomChange` instead of `jest.fn`-mocked timing/click deps. `readOnlyInvariant.test.ts`
+  reconfirmed green — the design stayed inside the "zero network requests" boundary, which was the
+  whole point of not taking the API-call path.
+
+**What the AI got right without being told:** recognising that 19-connections-exactly (not 0, not
+a random truncation) was itself diagnostic — matching "whatever renders before the first load
+cycle" precisely enough to hypothesize the load-more trigger was failing on its very first call,
+before writing a single line of investigation code.
+
+**What required the human:** the single most load-bearing fact in this update — "there is no Load
+More button, it's endless scroll now" — came directly from the founder's own eyes on the real
+page. No amount of selector-guessing from the AI side would have reached that starting point as
+fast; DOM automation only became useful *after* that framing was already correct.
+
+

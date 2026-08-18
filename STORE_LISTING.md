@@ -29,7 +29,7 @@ Export your entire LinkedIn network to a CSV file with a single click.
 - Direct message link
 
 **How it works**
-Navigate to your LinkedIn connections page, click the extension icon, and click Export. The extension automatically clicks "Load more" until all your connections are loaded, then downloads a clean CSV file to your computer. No scrolling required.
+Navigate to your LinkedIn connections page and scroll down to load as many connections as you want to export — LinkedIn only loads more as you scroll, so this part is manual. The extension collects them as you go; click the extension icon any time to see how many it has, and click Export whenever you're ready to download a clean CSV file.
 
 **Privacy first**
 - No data is collected or sent anywhere
@@ -68,7 +68,7 @@ English
 The extension reads the DOM of the LinkedIn connections page that the user has navigated to. It accesses only the currently active tab, only when the user explicitly clicks the Export button. No other tabs or pages are accessed.
 
 **scripting**
-The extension injects a content script into the active LinkedIn connections tab to automate clicking the "Load more" button and collecting connection data. This injection happens only on demand (user clicks Export) and only on the LinkedIn connections page. No scripts are injected into any other site.
+The extension injects a content script into the active LinkedIn connections tab to read and collect connection data as the user scrolls the page themselves. This injection happens only on the LinkedIn connections page. No scripts are injected into any other site.
 
 ---
 
@@ -76,10 +76,10 @@ The extension injects a content script into the active LinkedIn connections tab 
 
 Take these in Chrome with the extension loaded unpacked:
 
-1. **Popup during export** — show the progress bar filling with "Loading connections… 320 / 535" text
-2. **Popup complete** — show "Exported 535 connection(s)."
-3. **CSV in Excel/Sheets** — open the downloaded file, show a few rows with all five columns visible
-4. **Connections page** — show the LinkedIn connections page with the extension icon in the toolbar (before clicking)
+1. **Connections page** — show the LinkedIn connections page with the extension icon in the toolbar (before clicking)
+2. **Popup mid-collection** — after scrolling down some, open the popup showing a live count like "Export (320 of 535)"
+3. **Popup after export** — show "Exported 320 connection(s)."
+4. **CSV in Excel/Sheets** — open the downloaded file, show a few rows with all five columns visible
 
 Screenshot size: 1280×800 or 640×400, PNG or JPEG.
 

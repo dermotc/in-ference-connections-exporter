@@ -1,21 +1,25 @@
 # in-ference Connections Exporter
 
-A Manifest V3 Chrome extension that exports all your LinkedIn connections to a CSV file in one click — formatted for direct import into [in-ference](https://in-ference.com).
+A Manifest V3 Chrome extension that exports your LinkedIn connections to a CSV file as you scroll — formatted for direct import into [in-ference](https://in-ference.com).
 
 Forked from [nanaoosaki/linkedin_connections](https://github.com/nanaoosaki/linkedin_connections) (MIT licensed) — see [`LICENSE`](./LICENSE) for full attribution. Everything in "Human–AI collaboration" below describes the upstream project's original build; this fork's own changes are listed in "What changed in the in-ference fork".
 
-**Location:** this package lives at `linkedin-connections-exporter/` inside the `refairmeproto` monorepo — isolated (own `package.json`/toolchain, never bundled by Vite or deployed to Vercel), same pattern as `teaser/`. It is not yet pushed as its own GitHub repo; Option B below documents that path for when it is.
+Built and maintained as a standalone tool — own toolchain, no dependency on the in-ference app itself. Build-from-source instructions are in Option B below.
 
 ---
 
 ## What it does
 
-- Navigates to your LinkedIn connections page and clicks **Load more** repeatedly until all connections are loaded
+- Watches your LinkedIn connections page and collects every connection card as it loads — **you scroll, it collects.** LinkedIn only loads more of the list in response to a real scroll (see "Why scrolling is manual" below), so this part can't be automated
 - Collects name, profile URL, headline, connected date, and message URL for every connection — and parses employer + title out of the headline where the text makes it unambiguous
 - Downloads a clean `in-ference-connections.csv` to your machine — no data leaves your browser
-- Shows a live progress bar while loading (`X / total` when LinkedIn's count is available)
+- The popup shows a live count (`X of total`) any time you open it, so you always know how far you've gotten
 
-Tested with 535 connections in ~30 seconds on a fast connection. Timing scales with your internet speed — each "Load more" click fires a network request to LinkedIn's servers, so slower connections will take proportionally longer. The adaptive wait means the extension never idles longer than necessary: it moves to the next page as soon as new cards appear in the DOM rather than waiting a fixed delay.
+Collection starts the moment you open your connections page and keeps running in the background as you scroll — you don't need to keep the popup open. Click Export whenever you've scrolled far enough; it downloads everyone collected so far, deduplicated.
+
+### Why scrolling is manual
+
+LinkedIn's connections page used to have a clickable "Load more" button, which this extension could click by code. LinkedIn removed it (confirmed 18 Aug 2026) in favour of scroll-triggered loading — and that loading only responds to a **genuine, trusted** scroll event from a real mouse or trackpad. Programmatic scrolling (`scrollTop`, `scrollBy`, even a synthetic `WheelEvent`) was tested directly against a live account and left the page completely unchanged. This is a browser security boundary, not a selector to patch: no code running inside a content script can fabricate a trusted input event. If that ever becomes automatable again within this extension's minimal `activeTab`+`scripting` permissions, it will be — until then, the scroll is yours.
 
 ---
 
@@ -117,10 +121,10 @@ manifest.json               — MV3 manifest
 
 **Key design decisions:**
 
-- **Load More button, not scroll** — LinkedIn's connections page loads cards via a "Load more" button. Programmatic scrolling has no effect. The button is located by its text content (`"Load more"`) since it has no stable `id`, `data-testid`, or `aria-label`.
-- **Collect while scrolling** — LinkedIn uses a virtual list that removes old cards from the DOM as new ones are added. Cards are collected and deduplicated on every cycle (keyed by `profileUrl`) rather than parsed once at the end.
-- **Adaptive wait** — Instead of a fixed delay after each click, the loop polls `getRenderedCardCount()` every 150ms and proceeds as soon as new DOM cards appear (2000ms ceiling). Random jitter (100–300ms) is added to avoid a mechanically regular click pattern.
-- **Dependency injection** — All side effects in `scroll.ts` are injected via `ScrollDeps` and timing constants via `ScrollConfig`, making the core loop fully unit-testable without a browser.
+- **Passive collection, not automated scrolling (rewritten 18 Aug 2026)** — LinkedIn removed the "Load more" button and now only loads more of the list in response to a genuinely trusted scroll event, which no content script can fabricate (confirmed by direct testing — see "Why scrolling is manual" above). `scroll.ts`'s `startPassiveCollector` just watches the DOM via a `MutationObserver` and collects whatever appears; it never drives clicking or scrolling itself.
+- **Collect while scrolling** — LinkedIn uses a virtual list that removes old cards from the DOM as new ones are added. Cards are collected and deduplicated on every DOM-change notification (keyed by `profileUrl`), not parsed once at the end — a card the user has already scrolled past stays collected even after LinkedIn removes it from the DOM.
+- **No "done" state** — unlike the old click-loop, there is nothing to detect completion of; only the user knows when they've scrolled far enough. Export packages up whatever has been collected at the moment it's clicked.
+- **Dependency injection** — All side effects in `scroll.ts` are injected via `PassiveCollectorDeps` (`getCards`, `getTotalCount`, `onProgress`, `onDomChange`), making the collector fully unit-testable without a browser or a real `MutationObserver`.
 - **Zero obfuscated class names** — All selectors are anchored to `data-testid`, structural attributes, or text patterns. `selectors.ts` is the single source of truth with stability annotations.
 
 ---
@@ -171,7 +175,9 @@ document.querySelectorAll('[data-testid="lazy-column"] [data-display-contents="t
 
 If it returns `0`, the card selector needs updating. Open `src/content/selectors.ts`, inspect the live DOM, update `CARD`, rebuild, and reload.
 
-**Progress bar stays indeterminate (no `X / 535`)** — The `CONNECTIONS_TOTAL` selector hasn't matched your page's total-count element. Export still works; you just won't see the determinate bar or time estimate. To fix it, find the element on your page:
+**"Exported 19 connections" when you have thousands** — this isn't a bug in the extension, it means you haven't scrolled the LinkedIn page yet. Collection only picks up what's actually loaded in the DOM — LinkedIn only loads more as you scroll it yourself (see "Why scrolling is manual" near the top). Scroll down, watch the count in the popup climb, then click Export.
+
+**Popup count doesn't show a total (just a bare number, no "of X")** — The `CONNECTIONS_TOTAL` selector hasn't matched your page's total-count element. Export still works; you just won't see "X of Y". To fix it, find the element on your page:
 
 ```js
 Array.from(document.querySelectorAll('*')).filter(el =>
@@ -191,7 +197,8 @@ Open an issue with the output and I'll update the selector.
 ## Known limitations
 
 - LinkedIn DOM selectors may break when LinkedIn deploys updates — particularly obfuscated class names (none are used here, but structural attributes can also change)
-- The `CONNECTIONS_TOTAL` selector for the determinate progress bar needs live validation per LinkedIn account/locale
+- **Scrolling is manual** (see "Why scrolling is manual" above) — this isn't a bug, it's a hard browser boundary. There is no way to fully automate loading the full list from inside this extension's permission model
+- The `CONNECTIONS_TOTAL` selector for the "X of Y" count needs live validation per LinkedIn account/locale
 - Chrome Web Store submission pending — can be loaded unpacked in the meantime (see Install above)
 
 ---
@@ -210,6 +217,10 @@ This project was built entirely through conversation between a human and Claude 
 - The fact that scrolling does nothing — LinkedIn uses a Load More button, not infinite scroll
 
 **The Load More button fixture** — after the scroll approach failed, the human captured the button's `outerHTML` directly from DevTools, which confirmed the button text is `"Load more"` and has no stable `data-testid` or `aria-label` to target.
+
+> **Historical note, added 18 Aug 2026:** the button described above no longer exists — LinkedIn
+> replaced it with scroll-triggered loading sometime after this build. See "Why scrolling is
+> manual" near the top of this file for what's true today.
 
 **Scope and constraints** — `CLAUDE.md` and `REVIEW.md`, which defined the architecture boundaries and done criteria, were human-authored.
 
@@ -244,9 +255,9 @@ Forked from [nanaoosaki/linkedin_connections](https://github.com/nanaoosaki/link
 2. **CSV schema** — `src/domain/headline.ts` (new) splits a headline into `title` + `employer` on `" at "`/`" @ "`/`" — "`, honesty-contract: no recognised delimiter or an empty side returns both fields empty rather than a guess. Wired into `parser.ts`; `employer`/`title` added to `Connection` and to the CSV's `HEADERS`. Default download filename renamed `in-ference-connections.csv`.
 3. **Read-only invariant, made mechanical** — `tests/readOnlyInvariant.test.ts` scans every `src/**/*.ts` file for `fetch(`/`XMLHttpRequest`/`chrome.storage`/`localStorage`/etc. and asserts `manifest.json`'s permissions haven't grown. Proof-by-broken confirmed: a temporarily-injected `fetch()` call was caught by this test, then reverted.
 4. **Selector-maintenance ownership** — named (see "Selector maintenance" above); the DOM-fix cycle itself was already well-documented upstream, just needed an owner attached.
-5. **In-ference side (separate repo, `dermotc/refairmeproto`)**: `useContactImport.js`'s `parseCsv` now recognises a `profileUrl`/`profile url`/`linkedin url` column (deliberately not a bare `url` pattern — would collide with `messageUrl`) and reads it into `contact.profileUrl`. `network_relationships` gained a `to_profile_url` column and a third partial unique index (migration 137) so email-less contacts persist keyed on profile URL instead of being silently skipped.
+5. **In-ference app side (private, not part of this repo):** the app's own contact-import parser was updated separately to read the `profileUrl` column this tool's CSV exports, so an exported file matches columns the importer already recognised.
 
-**Not yet done in this fork:** the actual GitHub repository this README's URLs point to (`github.com/dermotc/in-ference-connections-exporter`) does not exist yet — this is local-only work pending `gh auth login` + repo creation + push. The dependency audit (`npm audit`: 10 vulnerabilities inherited from upstream's devDependencies, none in the shipped runtime bundle since nothing from `node_modules` is bundled by esbuild) was not addressed — out of scope for this fork's work items, flagged for a follow-up.
+**Known follow-up:** the dependency audit (`npm audit`: 10 vulnerabilities inherited from upstream's devDependencies, none in the shipped runtime bundle since nothing from `node_modules` is bundled by esbuild) was not addressed — out of scope for this fork's work items, flagged for a follow-up.
 
 ## License
 

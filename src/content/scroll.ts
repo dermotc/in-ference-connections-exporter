@@ -1,18 +1,26 @@
 /**
- * Load-more orchestration for full-list export.
+ * Passive collection for the assisted-scroll export flow.
  *
- * LinkedIn's connections page uses a "Load more" button, not infinite scroll.
- * Cards are collected on every cycle and deduplicated by profileUrl (virtual
- * list removes old cards from the DOM as new ones are added).
+ * CHANGED 18 Aug 2026 (founder-observed live, 19 of 29,793 connections
+ * exported): LinkedIn's connections page dropped the clickable "Load more"
+ * button entirely, and the replacement infinite-scroll ONLY loads more
+ * content in response to a genuinely trusted (real mouse/trackpad) scroll
+ * event — confirmed live: `element.scrollTop = x`, `scrollBy()`, and a
+ * synthetic `WheelEvent` dispatch all left the DOM completely unchanged,
+ * while a real scroll loaded dozens more connections every time. This is a
+ * hard browser security boundary (only genuine user input produces trusted
+ * events), not a selector that can be patched — no code running inside a
+ * content script (this extension's `activeTab`+`scripting` permission
+ * model) can fabricate it.
  *
- * Performance: adaptive wait polls every POLL_INTERVAL_MS until new DOM cards
- * appear (or MAX_WAIT_MS elapses), then adds a small random jitter so the
- * click pattern does not look mechanically regular.
+ * New design: the user scrolls for real; this module just watches the DOM
+ * and collects + deduplicates whatever appears, continuously, with no
+ * click/scroll driving of its own. Export packages up whatever has been
+ * collected at the moment the user clicks it — there is no "done" state to
+ * detect, because only the user knows when they've scrolled far enough.
  *
  * All side-effectful operations are injected as dependencies so this module
- * is fully unit-testable without a real browser.
- * Timing constants are exposed via ScrollConfig so tests can override them
- * without real delays.
+ * is fully unit-testable without a real browser or a real MutationObserver.
  */
 
 import { Connection } from '../domain/connection';
@@ -20,57 +28,40 @@ import { Connection } from '../domain/connection';
 export interface ProgressInfo {
   found:        number;         // unique connections collected so far
   total:        number | null;  // total from page element (null if unavailable)
-  elapsedMs:    number;         // ms since export started
-  remainingMs:  number | null;  // projected ms remaining (null if insufficient data)
+  elapsedMs:    number;         // ms since collection started
 }
 
-export interface ScrollDeps {
+export interface PassiveCollectorDeps {
   /** Returns all connection cards currently visible in the DOM. */
   getCards: () => Connection[];
-  /**
-   * Clicks the "Load more" button.
-   * Returns true if found and clicked, false if absent (all loaded).
-   */
-  triggerNextLoad: () => boolean;
-  /** Resolves after the given number of milliseconds. */
-  wait: (ms: number) => Promise<void>;
-  /** Raw count of card elements currently in the DOM (for adaptive wait polling). */
-  getRenderedCardCount: () => number;
-  /** Total connections shown on the page (e.g. "535 connections"). Null if unavailable. */
+  /** Total connections shown on the page (e.g. "29,793 connections"). Null if unavailable. */
   getTotalCount: () => number | null;
-  /** Called after each cycle with progress info for the UI. */
+  /** Called after each cycle that found at least one new card. */
   onProgress: (info: ProgressInfo) => void;
+  /**
+   * Subscribes to "the DOM may have changed, re-check for new cards."
+   * Production passes a MutationObserver-backed implementation (see
+   * content/index.ts); tests pass a manually-triggerable stub. Returns an
+   * unsubscribe function.
+   */
+  onDomChange: (callback: () => void) => () => void;
 }
 
-export interface ScrollConfig {
-  pollIntervalMs?: number;  // how often to check for new DOM cards (default 150)
-  maxWaitMs?:      number;  // give up polling and proceed after this long (default 2000)
-  jitterBaseMs?:   number;  // minimum extra pause after each load (default 100)
-  jitterRangeMs?:  number;  // random extra on top of jitterBase (default 200)
-  stableThreshold?: number; // consecutive no-growth cycles before stopping (default 2)
+export interface PassiveCollectorHandle {
+  /** Current deduplicated collection, in first-seen order. */
+  getCollected: () => Connection[];
+  /** Stops watching the DOM. */
+  stop: () => void;
 }
 
 /**
- * Clicks "Load more" repeatedly, collecting and deduplicating connection cards
- * on every cycle. Uses adaptive polling to proceed as soon as new DOM cards
- * appear rather than waiting a fixed duration.
- *
- * Returns the full deduplicated collection.
+ * Starts passively collecting connection cards as they appear in the DOM —
+ * whether from the user scrolling, LinkedIn's own lazy-rendering, or
+ * anything else. Ingests whatever is already visible immediately, then
+ * re-checks on every DOM-change notification.
  */
-export async function scrollAndCollect(
-  deps: ScrollDeps,
-  config: ScrollConfig = {},
-): Promise<Connection[]> {
-  const {
-    getCards, triggerNextLoad, wait,
-    getRenderedCardCount, getTotalCount, onProgress,
-  } = deps;
-
-  const POLL_INTERVAL_MS  = config.pollIntervalMs  ?? 150;
-  const MAX_WAIT_MS       = config.maxWaitMs       ?? 2000;
-  const JITTER_BASE_MS    = config.jitterBaseMs    ?? 100;
-  const JITTER_RANGE_MS   = config.jitterRangeMs   ?? 200;
-  const STABLE_THRESHOLD  = config.stableThreshold ?? 2;
+export function startPassiveCollector(deps: PassiveCollectorDeps): PassiveCollectorHandle {
+  const { getCards, getTotalCount, onProgress, onDomChange } = deps;
 
   const collected = new Map<string, Connection>();
   const startTime = Date.now();
@@ -85,48 +76,24 @@ export async function scrollAndCollect(
   }
 
   function buildProgress(): ProgressInfo {
-    const elapsedMs   = Date.now() - startTime;
-    const total       = getTotalCount();
-    const found       = collected.size;
-    const rate        = elapsedMs > 0 ? found / elapsedMs : 0; // connections per ms
-    const remainingMs = rate > 0 && total !== null && total > found
-      ? Math.round((total - found) / rate)
-      : null;
-    return { found, total, elapsedMs, remainingMs };
+    return {
+      found:     collected.size,
+      total:     getTotalCount(),
+      elapsedMs: Date.now() - startTime,
+    };
   }
 
-  // Collect whatever is already visible before the first click
+  // Collect whatever is already visible the moment collection starts.
   ingest(getCards());
   onProgress(buildProgress());
 
-  let stableChecks = 0;
+  const unsubscribe = onDomChange(() => {
+    const added = ingest(getCards());
+    if (added > 0) onProgress(buildProgress());
+  });
 
-  while (stableChecks < STABLE_THRESHOLD) {
-    const hasMore = triggerNextLoad();
-    if (!hasMore) break; // button gone — all connections loaded
-
-    // Adaptive wait: poll until DOM card count changes or MAX_WAIT_MS elapses.
-    // Uses an elapsed counter (not Date.now) so test mocks work without real delays.
-    const rawBefore = getRenderedCardCount();
-    let waited = 0;
-    while (waited < MAX_WAIT_MS) {
-      await wait(POLL_INTERVAL_MS);
-      waited += POLL_INTERVAL_MS;
-      if (getRenderedCardCount() !== rawBefore) break;
-    }
-
-    // Jitter: vary the pause between clicks so the pattern is not mechanically regular
-    await wait(JITTER_BASE_MS + Math.floor(Math.random() * JITTER_RANGE_MS));
-
-    const newCards = ingest(getCards());
-    onProgress(buildProgress());
-
-    if (newCards > 0) {
-      stableChecks = 0;
-    } else {
-      stableChecks++;
-    }
-  }
-
-  return Array.from(collected.values());
+  return {
+    getCollected: () => Array.from(collected.values()),
+    stop: unsubscribe,
+  };
 }
