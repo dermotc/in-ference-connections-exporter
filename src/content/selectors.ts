@@ -32,19 +32,13 @@ export const SELECTORS = {
   MESSAGE_LINK: 'a[href*="/messaging/compose/"]',
 
   /**
-   * LOW/UNKNOWN — element containing the total connections count (e.g. "535 connections").
-   * Requires live validation; null returned gracefully if not found.
-   * Used to show "120 / 535" and a time-remaining estimate in the popup.
-   * Update this selector after inspecting the live page heading area.
+   * LOW/text-pattern — live-verified 18 Aug 2026 against a real account: the total-count
+   * element (e.g. "29,793 connections") is a bare `<p>` with fully obfuscated class names
+   * and no data-testid/id/aria-label at all — there is no stable CSS selector for it, only
+   * its text shape. Matched by CONNECTIONS_TOTAL_PATTERN in index.ts (find the first leaf
+   * element whose text matches), not by querySelector. Previously a static CSS-selector
+   * guess (`[data-testid="connections-count"], .mn-connections__header h1`) that had never
+   * actually matched anything live — this replaces it with what was actually verified.
    */
-  CONNECTIONS_TOTAL: '[data-testid="connections-count"], .mn-connections__header h1',
-
-  /**
-   * HIGH stability — exact visible text of LinkedIn's "Load more" button.
-   * The button has no data-testid, id, or aria-label — only obfuscated class names.
-   * Text content is the most stable hook available.
-   * Used in index.ts: find button by textContent === LOAD_MORE_BUTTON_TEXT, then click.
-   * Button absence signals all connections are loaded (natural loop stop condition).
-   */
-  LOAD_MORE_BUTTON_TEXT: 'Load more',
+  CONNECTIONS_TOTAL_PATTERN: /^\s*\d{1,3}(,\d{3})*\s+connections?\s*$/i,
 } as const;

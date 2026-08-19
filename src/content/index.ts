@@ -21,8 +21,15 @@ if (!window.__liExporterLoaded) {
   const collector = startPassiveCollector({
     getCards: () => parseConnections(document),
 
+    // No stable CSS selector exists for this element (see selectors.ts) — it's
+    // matched by text shape instead, same technique the removed Load-more
+    // button lookup used to use. Scoped to leaf elements only so a wrapping
+    // container (whose textContent includes the count plus everything inside
+    // it) can't match ahead of the actual element.
     getTotalCount: () => {
-      const el = document.querySelector(SELECTORS.CONNECTIONS_TOTAL);
+      const el = Array.from(document.querySelectorAll<HTMLElement>('*')).find(
+        e => e.children.length === 0 && SELECTORS.CONNECTIONS_TOTAL_PATTERN.test(e.textContent ?? '')
+      );
       if (!el) return null;
       const match = el.textContent?.match(/(\d[\d,]*)/);
       return match ? parseInt(match[1].replace(/,/g, ''), 10) : null;

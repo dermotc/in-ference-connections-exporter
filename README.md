@@ -177,7 +177,7 @@ If it returns `0`, the card selector needs updating. Open `src/content/selectors
 
 **"Exported 19 connections" when you have thousands** — this isn't a bug in the extension, it means you haven't scrolled the LinkedIn page yet. Collection only picks up what's actually loaded in the DOM — LinkedIn only loads more as you scroll it yourself (see "Why scrolling is manual" near the top). Scroll down, watch the count in the popup climb, then click Export.
 
-**Popup count doesn't show a total (just a bare number, no "of X")** — The `CONNECTIONS_TOTAL` selector hasn't matched your page's total-count element. Export still works; you just won't see "X of Y". To fix it, find the element on your page:
+**Popup count doesn't show a total (just a bare number, no "of X")** — `CONNECTIONS_TOTAL_PATTERN` (live-verified 18 Aug 2026 against a real "29,793 connections" account) hasn't matched your page's total-count text, most likely a locale difference (e.g. a non-English "connections" label). Export still works; you just won't see "X of Y". To fix it, find the element on your page:
 
 ```js
 Array.from(document.querySelectorAll('*')).filter(el =>
@@ -198,7 +198,7 @@ Open an issue with the output and I'll update the selector.
 
 - LinkedIn DOM selectors may break when LinkedIn deploys updates — particularly obfuscated class names (none are used here, but structural attributes can also change)
 - **Scrolling is manual** (see "Why scrolling is manual" above) — this isn't a bug, it's a hard browser boundary. There is no way to fully automate loading the full list from inside this extension's permission model
-- The `CONNECTIONS_TOTAL` selector for the "X of Y" count needs live validation per LinkedIn account/locale
+- `CONNECTIONS_TOTAL_PATTERN` for the "X of Y" count is live-verified against an English-locale account (18 Aug 2026) — a different display locale may need the pattern widened
 - Chrome Web Store submission pending — can be loaded unpacked in the meantime (see Install above)
 
 ---
